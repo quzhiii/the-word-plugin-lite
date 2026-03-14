@@ -1,0 +1,7 @@
+# Generated package artifact
+package/THU-Formatter-Lite.dotm
+package/THU-Formatter-Lite.zip
+
+# Local runtime artifacts
+*.log
+*.tmp
