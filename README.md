@@ -24,17 +24,37 @@ Word Ribbon add-in for fast, accurate thesis format cleanup.
 - `PACK_RELEASE.ps1` - build `THU-Formatter-Lite.zip` from the validated package
 - `docs/` - packaging, testing, release, and acceptance docs
 
-## Package Workflow
-1. Build `THU-Formatter-Lite.dotm` from the VBA source.
-2. Inject `customUI/customUI14.xml` with RibbonX Editor.
-3. Place the final template into `package/THU-Formatter-Lite.dotm`.
-4. Run:
+## Build Template
+1. Prepare a base macro-enabled template once:
+   - copy `%APPDATA%\Microsoft\Templates\Normal.dotm` to `package/THU-Formatter-Lite.base.dotm`
+   - open that copy in Word
+   - import `src/vba/THU_Formatter_Addin.bas`
+   - save and close
+2. Run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\BUILD_TEMPLATE.ps1
+```
+
+This script:
+- copies the base template into `package/THU-Formatter-Lite.dotm`
+- injects `customUI/customUI14.xml`
+- checks the final package still contains `word/vbaProject.bin`
+
+## Validate Package
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\VALIDATE_PACKAGE.ps1
 ```
 
 ## Install
+```powershell
+powershell -ExecutionPolicy Bypass -File .\BUILD_TEMPLATE.ps1
+powershell -ExecutionPolicy Bypass -File .\INSTALL.ps1
+```
+
+Or install an already-built `package/THU-Formatter-Lite.dotm` directly:
+
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\INSTALL.ps1
 ```

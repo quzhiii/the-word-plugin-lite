@@ -5,3 +5,5 @@ package/THU-Formatter-Lite.zip
 # Local runtime artifacts
 *.log
 *.tmp
+package/THU-Formatter-Lite.base.dotm
+package/_build_tmp/
