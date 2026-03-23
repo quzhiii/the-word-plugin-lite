@@ -4,8 +4,20 @@ Option Explicit
 Private gRibbon As IRibbonUI
 
 Private Const ENV_TEMPLATE_PATH As String = "THU_TEMPLATE_PATH"
+Private Const ENV_ENGINE_MODE As String = "THU_ENGINE_MODE"
+Private Const ENV_ENGINE_CMD As String = "THU_ENGINE_CMD"
+Private Const ENV_ENGINE_PROFILE As String = "THU_ENGINE_PROFILE"
+Private Const ENV_ENGINE_FIX_MODE As String = "THU_ENGINE_FIX_MODE"
+Private Const ENGINE_MODE_AUTO As String = "auto"
+Private Const ENGINE_MODE_LEGACY As String = "legacy"
+Private Const ENGINE_MODE_CLI As String = "cli"
+Private Const FIX_MODE_SAFE As String = "safe"
+Private Const FIX_MODE_FULL As String = "full"
+Private Const DEFAULT_ENGINE_FIX_MODE As String = FIX_MODE_SAFE
+Private Const DEFAULT_ENGINE_PROFILE As String = "tsinghua-thesis"
 Private Const TABLE_OUTER_WIDTH As Long = wdLineWidth150pt
 Private Const TABLE_INNER_WIDTH As Long = wdLineWidth050pt
+
 
 ' ===== Ribbon callbacks =====
 Public Sub OnRibbonLoad(ByVal ribbon As IRibbonUI)
@@ -26,6 +38,10 @@ Public Sub OneClickDetectAndFix()
     Dim fixedDocx As String
     Dim fixedPdf As String
     Dim logPath As String
+    Dim engineMode As String
+    Dim engineCmd As String
+    Dim engineProfile As String
+    Dim engineFixMode As String
     Dim headingFixCount As Long
     Dim bodyFixCount As Long
     Dim tableFixCount As Long
@@ -45,9 +61,29 @@ Public Sub OneClickDetectAndFix()
     fixedDocx = BuildOutputPath(srcPath, "_fixed.docx")
     fixedPdf = BuildOutputPath(srcPath, "_fixed.pdf")
     logPath = BuildOutputPath(srcPath, "_fix_log.txt")
+    engineMode = ResolveEngineMode()
+    engineCmd = Trim$(Environ$(ENV_ENGINE_CMD))
+    engineProfile = ResolveEngineProfile()
+    engineFixMode = ResolveEngineFixMode()
 
     On Error GoTo Handler
     AppendLog logPath, "START: THU Formatter Add-in"
+    AppendLog logPath, "MODE: engine_mode=" & engineMode & ", profile=" & engineProfile & ", fix_mode=" & engineFixMode
+
+    If ShouldTryCli(engineMode, engineCmd) Then
+        If RunEngineCliPipeline(srcPath, fixedDocx, fixedPdf, logPath, engineCmd, engineProfile, engineFixMode) Then
+            MsgBox "THU Formatter 已完成（thesis-format-engine）。" & vbCrLf & _
+                "输出 DOCX: " & fixedDocx & vbCrLf & _
+                "输出 PDF: " & fixedPdf, vbInformation
+            Exit Sub
+        ElseIf engineMode = ENGINE_MODE_CLI Then
+            Err.Raise vbObjectError + 2500, "THU Formatter", "thesis-format-engine CLI 执行失败，请检查 THU_ENGINE_CMD 与日志。"
+        Else
+            AppendLog logPath, "BRIDGE: fallback to legacy VBA pipeline"
+        End If
+    ElseIf engineMode = ENGINE_MODE_CLI Then
+        Err.Raise vbObjectError + 2501, "THU Formatter", "THU_ENGINE_MODE=cli 但未配置 THU_ENGINE_CMD。"
+    End If
 
     TemplateBinder logPath
     DocScanner logPath
@@ -80,6 +116,7 @@ Handler:
     AppendLog logPath, "ERROR: " & CStr(Err.Number) & " - " & Err.Description
     MsgBox "格式修复失败: " & Err.Description, vbExclamation
 End Sub
+
 
 Private Function BuildOutputPath(ByVal srcPath As String, ByVal suffix As String) As String
     Dim dotPos As Long
@@ -413,20 +450,190 @@ Private Function ShouldSkipTable(ByVal tbl As Table) As Boolean
 End Function
 
 Private Sub RefreshFieldsAndToc(ByVal logPath As String)
+    RefreshFieldsAndTocForDocument ActiveDocument, logPath
+End Sub
+
+Private Sub RefreshFieldsAndTocForDocument(ByVal targetDoc As Document, ByVal logPath As String)
     Dim toc As TableOfContents
     Dim tof As TableOfFigures
 
-    ActiveDocument.Fields.Update
+    targetDoc.Fields.Update
 
-    For Each toc In ActiveDocument.TablesOfContents
+    For Each toc In targetDoc.TablesOfContents
         toc.Update
     Next toc
 
-    For Each tof In ActiveDocument.TablesOfFigures
+    For Each tof In targetDoc.TablesOfFigures
         tof.Update
     Next tof
 
     AppendLog logPath, "FIELD: fields/toc/tof updated"
+End Sub
+
+Private Function ResolveEngineMode() As String
+    Dim modeText As String
+
+    modeText = LCase$(Trim$(Environ$(ENV_ENGINE_MODE)))
+    Select Case modeText
+        Case ENGINE_MODE_LEGACY
+            ResolveEngineMode = ENGINE_MODE_LEGACY
+        Case ENGINE_MODE_CLI
+            ResolveEngineMode = ENGINE_MODE_CLI
+        Case Else
+            ResolveEngineMode = ENGINE_MODE_AUTO
+    End Select
+End Function
+
+Private Function ResolveEngineProfile() As String
+    Dim profileText As String
+
+    profileText = Trim$(Environ$(ENV_ENGINE_PROFILE))
+    If Len(profileText) = 0 Then
+        ResolveEngineProfile = DEFAULT_ENGINE_PROFILE
+    Else
+        ResolveEngineProfile = profileText
+    End If
+End Function
+
+Private Function ResolveEngineFixMode() As String
+    Dim modeText As String
+
+    modeText = LCase$(Trim$(Environ$(ENV_ENGINE_FIX_MODE)))
+    Select Case modeText
+        Case FIX_MODE_FULL
+            ResolveEngineFixMode = FIX_MODE_FULL
+        Case FIX_MODE_SAFE
+            ResolveEngineFixMode = FIX_MODE_SAFE
+        Case Else
+            ResolveEngineFixMode = DEFAULT_ENGINE_FIX_MODE
+    End Select
+End Function
+
+Private Function ShouldTryCli(ByVal engineMode As String, ByVal engineCmd As String) As Boolean
+    If engineMode = ENGINE_MODE_CLI Then
+        ShouldTryCli = True
+    ElseIf engineMode = ENGINE_MODE_AUTO And Len(Trim$(engineCmd)) > 0 Then
+        ShouldTryCli = True
+    Else
+        ShouldTryCli = False
+    End If
+End Function
+
+Private Function RunEngineCliPipeline(ByVal srcPath As String, ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal logPath As String, ByVal engineCmd As String, ByVal engineProfile As String, ByVal engineFixMode As String) As Boolean
+    Dim outputDir As String
+    Dim reportTextPath As String
+    Dim reportJsonPath As String
+    Dim reportHtmlPath As String
+    Dim commandText As String
+    Dim exitCode As Long
+
+    RunEngineCliPipeline = False
+
+    If Len(Trim$(engineCmd)) = 0 Then
+        AppendLog logPath, "BRIDGE: THU_ENGINE_CMD empty"
+        Exit Function
+    End If
+
+    outputDir = GetParentFolderPath(srcPath)
+    reportTextPath = BuildOutputPath(srcPath, "_report.txt")
+    reportJsonPath = BuildOutputPath(srcPath, "_report.json")
+    reportHtmlPath = BuildOutputPath(srcPath, "_report.html")
+
+    commandText = "cmd.exe /c " & engineCmd & " fix " & QuoteArg(srcPath) & _
+        " --profile " & QuoteArg(engineProfile) & _
+        " --mode " & QuoteArg(engineFixMode) & " --out " & QuoteArg(outputDir) & _
+        " >> " & QuoteArg(logPath) & " 2>&1"
+
+    AppendLog logPath, "BRIDGE: start thesis-format-engine " & engineFixMode & " fix"
+    AppendLog logPath, "BRIDGE: command=" & engineCmd & " fix <docx> --profile " & engineProfile & " --mode " & engineFixMode & " --out " & outputDir
+    exitCode = RunHiddenCommand(commandText)
+    AppendLog logPath, "BRIDGE: exit_code=" & CStr(exitCode)
+
+    If exitCode <> 0 Then
+        Exit Function
+    End If
+
+    If Dir$(fixedDocx) = "" Then
+        AppendLog logPath, "BRIDGE: fixed docx missing: " & fixedDocx
+        Exit Function
+    End If
+
+    If Dir$(reportTextPath) <> "" Then
+        AppendExistingTextFile logPath, reportTextPath, "ENGINE_REPORT"
+    End If
+
+    ExportPdfFromFixedDocx fixedDocx, fixedPdf, logPath
+    AppendLog logPath, "BRIDGE: artifacts docx=" & fixedDocx & ", pdf=" & fixedPdf & ", report_json=" & reportJsonPath & ", report_html=" & reportHtmlPath & ", report_text=" & reportTextPath
+    RunEngineCliPipeline = True
+End Function
+
+Private Sub ExportPdfFromFixedDocx(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal logPath As String)
+    Dim resultDoc As Document
+
+    On Error GoTo CleanFail
+    Set resultDoc = Application.Documents.Open(FileName:=fixedDocx, AddToRecentFiles:=False, ReadOnly:=False, Visible:=False)
+    RefreshFieldsAndTocForDocument resultDoc, logPath
+    resultDoc.Save
+    resultDoc.ExportAsFixedFormat OutputFileName:=fixedPdf, ExportFormat:=wdExportFormatPDF
+    resultDoc.Close SaveChanges:=wdSaveChanges
+    AppendLog logPath, "BRIDGE: exported pdf " & fixedPdf
+    Exit Sub
+
+CleanFail:
+    On Error Resume Next
+    If Not resultDoc Is Nothing Then
+        resultDoc.Close SaveChanges:=wdDoNotSaveChanges
+    End If
+    On Error GoTo 0
+    Err.Raise Err.Number, Err.Source, Err.Description
+End Sub
+
+Private Function RunHiddenCommand(ByVal commandText As String) As Long
+    Dim shellObj As Object
+
+    Set shellObj = CreateObject("WScript.Shell")
+    RunHiddenCommand = shellObj.Run(commandText, 0, True)
+End Function
+
+Private Function QuoteArg(ByVal rawText As String) As String
+    QuoteArg = Chr$(34) & Replace$(rawText, Chr$(34), Chr$(34) & Chr$(34)) & Chr$(34)
+End Function
+
+Private Function GetParentFolderPath(ByVal filePath As String) As String
+    Dim slashPos As Long
+
+    slashPos = InStrRev(filePath, Application.PathSeparator)
+    If slashPos > 0 Then
+        GetParentFolderPath = Left$(filePath, slashPos - 1)
+    Else
+        GetParentFolderPath = CurDir$
+    End If
+End Function
+
+Private Sub AppendExistingTextFile(ByVal targetPath As String, ByVal sourcePath As String, ByVal sectionName As String)
+    Dim ffIn As Integer
+    Dim ffOut As Integer
+    Dim lineText As String
+
+    If Dir$(sourcePath) = "" Then
+        Exit Sub
+    End If
+
+    ffIn = FreeFile
+    Open sourcePath For Input As #ffIn
+
+    ffOut = FreeFile
+    Open targetPath For Append As #ffOut
+    Print #ffOut, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & sectionName & ": begin"
+
+    Do While Not EOF(ffIn)
+        Line Input #ffIn, lineText
+        Print #ffOut, lineText
+    Loop
+
+    Print #ffOut, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & sectionName & ": end"
+    Close #ffIn
+    Close #ffOut
 End Sub
 
 Private Sub AppendLog(ByVal logPath As String, ByVal lineText As String)

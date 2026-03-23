@@ -56,3 +56,22 @@
 - 新手隔离测试：`docs/NEW_USER_ACCOUNT_TEST_CHECKLIST.zh-CN.md`
 - 专家验收：`docs/EXPERT_ACCEPTANCE_CHECKLIST.zh-CN.md`
 - 发布清单：`docs/RELEASE_CHECKLIST.zh-CN.md`
+
+## Optional: Bridge to `thesis-format-engine`
+If you have already installed the new Python/CLI engine, the button can call it first:
+
+```powershell
+setx THU_ENGINE_MODE cli
+setx THU_ENGINE_CMD "thesis-engine"
+setx THU_ENGINE_PROFILE "tsinghua-thesis"
+setx THU_ENGINE_FIX_MODE "full"
+```
+
+Modes:
+- `cli`: use only the new engine; fail fast if it errors
+- `auto`: try the new engine first, then fall back to legacy VBA
+- `legacy`: always use the current VBA pipeline
+
+Fix modes:
+- `safe`: default; only LOW-risk repairs
+- `full`: includes MEDIUM-risk repairs such as three-line table normalization
