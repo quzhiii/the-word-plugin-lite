@@ -15,6 +15,7 @@ Private Const FIX_MODE_SAFE As String = "safe"
 Private Const FIX_MODE_FULL As String = "full"
 Private Const DEFAULT_ENGINE_FIX_MODE As String = FIX_MODE_SAFE
 Private Const DEFAULT_ENGINE_PROFILE As String = "tsinghua-thesis"
+Private Const BRIDGE_VERSION As String = "2026-03-24.4"
 Private Const TABLE_OUTER_WIDTH As Long = wdLineWidth150pt
 Private Const TABLE_INNER_WIDTH As Long = wdLineWidth050pt
 
@@ -62,24 +63,21 @@ Public Sub OneClickDetectAndFix()
     fixedPdf = BuildOutputPath(srcPath, "_fixed.pdf")
     logPath = BuildOutputPath(srcPath, "_fix_log.txt")
     engineMode = ResolveEngineMode()
-    engineCmd = Trim$(Environ$(ENV_ENGINE_CMD))
+    engineCmd = ReadSettingValue(ENV_ENGINE_CMD)
     engineProfile = ResolveEngineProfile()
     engineFixMode = ResolveEngineFixMode()
 
     On Error GoTo Handler
     AppendLog logPath, "START: THU Formatter Add-in"
+    AppendLog logPath, "VERSION: " & BRIDGE_VERSION
     AppendLog logPath, "MODE: engine_mode=" & engineMode & ", profile=" & engineProfile & ", fix_mode=" & engineFixMode
 
     If ShouldTryCli(engineMode, engineCmd) Then
         If RunEngineCliPipeline(srcPath, fixedDocx, fixedPdf, logPath, engineCmd, engineProfile, engineFixMode) Then
-            MsgBox "THU Formatter 已完成（thesis-format-engine）。" & vbCrLf & _
-                "输出 DOCX: " & fixedDocx & vbCrLf & _
-                "输出 PDF: " & fixedPdf, vbInformation
+            ShowCliSuccess fixedDocx, fixedPdf, BuildOutputPath(srcPath, "_report.html"), BuildOutputPath(srcPath, "_report.txt"), logPath
             Exit Sub
-        ElseIf engineMode = ENGINE_MODE_CLI Then
-            Err.Raise vbObjectError + 2500, "THU Formatter", "thesis-format-engine CLI 执行失败，请检查 THU_ENGINE_CMD 与日志。"
         Else
-            AppendLog logPath, "BRIDGE: fallback to legacy VBA pipeline"
+            AppendLog logPath, "BRIDGE: CLI failed, fallback to legacy VBA pipeline"
         End If
     ElseIf engineMode = ENGINE_MODE_CLI Then
         Err.Raise vbObjectError + 2501, "THU Formatter", "THU_ENGINE_MODE=cli 但未配置 THU_ENGINE_CMD。"
@@ -107,9 +105,7 @@ Public Sub OneClickDetectAndFix()
         ", inline_warn=" & CStr(inlineWarnCount)
     AppendLog logPath, "DONE: exported docx/pdf"
 
-    MsgBox "THU Formatter 已完成。" & vbCrLf & _
-        "输出 DOCX: " & fixedDocx & vbCrLf & _
-        "输出 PDF: " & fixedPdf, vbInformation
+    ShowLegacySuccess fixedDocx, fixedPdf, logPath, headingFixCount, bodyFixCount, tableFixCount, captionFixCount, inlineFixCount
     Exit Sub
 
 Handler:
@@ -130,7 +126,7 @@ End Function
 
 Private Sub TemplateBinder(ByVal logPath As String)
     Dim templatePath As String
-    templatePath = Trim$(Environ$(ENV_TEMPLATE_PATH))
+    templatePath = ReadSettingValue(ENV_TEMPLATE_PATH)
 
     If Len(templatePath) = 0 Then
         AppendLog logPath, "TEMPLATE: skip attach (env THU_TEMPLATE_PATH empty)"
@@ -473,7 +469,7 @@ End Sub
 Private Function ResolveEngineMode() As String
     Dim modeText As String
 
-    modeText = LCase$(Trim$(Environ$(ENV_ENGINE_MODE)))
+    modeText = LCase$(ReadSettingValue(ENV_ENGINE_MODE))
     Select Case modeText
         Case ENGINE_MODE_LEGACY
             ResolveEngineMode = ENGINE_MODE_LEGACY
@@ -487,7 +483,7 @@ End Function
 Private Function ResolveEngineProfile() As String
     Dim profileText As String
 
-    profileText = Trim$(Environ$(ENV_ENGINE_PROFILE))
+    profileText = ReadSettingValue(ENV_ENGINE_PROFILE)
     If Len(profileText) = 0 Then
         ResolveEngineProfile = DEFAULT_ENGINE_PROFILE
     Else
@@ -498,7 +494,7 @@ End Function
 Private Function ResolveEngineFixMode() As String
     Dim modeText As String
 
-    modeText = LCase$(Trim$(Environ$(ENV_ENGINE_FIX_MODE)))
+    modeText = LCase$(ReadSettingValue(ENV_ENGINE_FIX_MODE))
     Select Case modeText
         Case FIX_MODE_FULL
             ResolveEngineFixMode = FIX_MODE_FULL
@@ -524,6 +520,7 @@ Private Function RunEngineCliPipeline(ByVal srcPath As String, ByVal fixedDocx A
     Dim reportTextPath As String
     Dim reportJsonPath As String
     Dim reportHtmlPath As String
+    Dim cliInputPath As String
     Dim commandText As String
     Dim exitCode As Long
 
@@ -538,15 +535,16 @@ Private Function RunEngineCliPipeline(ByVal srcPath As String, ByVal fixedDocx A
     reportTextPath = BuildOutputPath(srcPath, "_report.txt")
     reportJsonPath = BuildOutputPath(srcPath, "_report.json")
     reportHtmlPath = BuildOutputPath(srcPath, "_report.html")
+    cliInputPath = CreateCliInputSnapshot(srcPath, logPath)
 
-    commandText = "cmd.exe /c " & engineCmd & " fix " & QuoteArg(srcPath) & _
+    commandText = NormalizeCommandExecutable(engineCmd) & " fix " & QuoteArg(cliInputPath) & _
         " --profile " & QuoteArg(engineProfile) & _
-        " --mode " & QuoteArg(engineFixMode) & " --out " & QuoteArg(outputDir) & _
-        " >> " & QuoteArg(logPath) & " 2>&1"
+        " --mode " & QuoteArg(engineFixMode) & " --out " & QuoteArg(outputDir)
 
     AppendLog logPath, "BRIDGE: start thesis-format-engine " & engineFixMode & " fix"
     AppendLog logPath, "BRIDGE: command=" & engineCmd & " fix <docx> --profile " & engineProfile & " --mode " & engineFixMode & " --out " & outputDir
-    exitCode = RunHiddenCommand(commandText)
+    AppendLog logPath, "BRIDGE: cli_input=" & cliInputPath
+    exitCode = RunCommandCaptureToLog(commandText, logPath)
     AppendLog logPath, "BRIDGE: exit_code=" & CStr(exitCode)
 
     If exitCode <> 0 Then
@@ -588,15 +586,297 @@ CleanFail:
     Err.Raise Err.Number, Err.Source, Err.Description
 End Sub
 
-Private Function RunHiddenCommand(ByVal commandText As String) As Long
+Private Function RunCommandCaptureToLog(ByVal commandText As String, ByVal logPath As String) As Long
     Dim shellObj As Object
+    Dim execObj As Object
+    Dim stdoutText As String
+    Dim stderrText As String
 
     Set shellObj = CreateObject("WScript.Shell")
-    RunHiddenCommand = shellObj.Run(commandText, 0, True)
+    Set execObj = shellObj.Exec(commandText)
+
+    Do While execObj.Status = 0
+        DoEvents
+    Loop
+
+    stdoutText = execObj.StdOut.ReadAll
+    stderrText = execObj.StdErr.ReadAll
+
+    If Len(stdoutText) > 0 Then
+        AppendCommandOutput logPath, stdoutText
+    End If
+    If Len(stderrText) > 0 Then
+        AppendCommandOutput logPath, stderrText
+    End If
+
+    RunCommandCaptureToLog = execObj.ExitCode
 End Function
 
 Private Function QuoteArg(ByVal rawText As String) As String
     QuoteArg = Chr$(34) & Replace$(rawText, Chr$(34), Chr$(34) & Chr$(34)) & Chr$(34)
+End Function
+
+Private Function ReadSettingValue(ByVal envName As String) As String
+    Dim shellObj As Object
+    Dim valueText As String
+
+    On Error Resume Next
+    Set shellObj = CreateObject("WScript.Shell")
+    valueText = Trim$(CStr(shellObj.RegRead("HKEY_CURRENT_USER\Environment\" & envName)))
+    On Error GoTo 0
+
+    If Len(valueText) > 0 Then
+        ReadSettingValue = valueText
+    Else
+        ReadSettingValue = Trim$(Environ$(envName))
+    End If
+End Function
+
+Private Function ReadTextFileSafe(ByVal filePath As String) As String
+    Dim ff As Integer
+    Dim lineText As String
+    Dim buffer As String
+
+    If Dir$(filePath) = "" Then
+        ReadTextFileSafe = ""
+        Exit Function
+    End If
+
+    On Error GoTo ReadFailed
+    ff = FreeFile
+    Open filePath For Input As #ff
+    Do While Not EOF(ff)
+        Line Input #ff, lineText
+        buffer = buffer & lineText & vbCrLf
+    Loop
+    Close #ff
+    ReadTextFileSafe = buffer
+    Exit Function
+
+ReadFailed:
+    On Error Resume Next
+    If ff > 0 Then
+        Close #ff
+    End If
+    On Error GoTo 0
+    ReadTextFileSafe = ""
+End Function
+
+Private Function ExtractIntByRegex(ByVal sourceText As String, ByVal patternText As String, ByVal defaultValue As Long) As Long
+    Dim rgx As Object
+    Dim matches As Object
+
+    If Len(sourceText) = 0 Then
+        ExtractIntByRegex = defaultValue
+        Exit Function
+    End If
+
+    Set rgx = CreateObject("VBScript.RegExp")
+    rgx.Pattern = patternText
+    rgx.Global = False
+    rgx.IgnoreCase = True
+    rgx.MultiLine = True
+
+    If rgx.Test(sourceText) Then
+        Set matches = rgx.Execute(sourceText)
+        ExtractIntByRegex = CLng(matches(0).SubMatches(0))
+    Else
+        ExtractIntByRegex = defaultValue
+    End If
+End Function
+
+Private Function NormalizeCommandExecutable(ByVal rawCommand As String) As String
+    Dim trimmedCommand As String
+
+    trimmedCommand = Trim$(rawCommand)
+    If Len(trimmedCommand) = 0 Then
+        NormalizeCommandExecutable = trimmedCommand
+        Exit Function
+    End If
+
+    If Left$(trimmedCommand, 1) = Chr$(34) Then
+        NormalizeCommandExecutable = trimmedCommand
+        Exit Function
+    End If
+
+    If InStr(trimmedCommand, " ") > 0 Then
+        If Dir$(trimmedCommand) <> "" Then
+            NormalizeCommandExecutable = QuoteArg(trimmedCommand)
+            Exit Function
+        End If
+    End If
+
+    NormalizeCommandExecutable = trimmedCommand
+End Function
+
+Private Function CreateCliInputSnapshot(ByVal srcPath As String, ByVal logPath As String) As String
+    Dim tempRoot As String
+    Dim tempDir As String
+    Dim snapshotPath As String
+
+    tempRoot = Trim$(Environ$("TEMP"))
+    If Len(tempRoot) = 0 Then
+        tempRoot = CurDir$
+    End If
+
+    tempDir = JoinPathText(tempRoot, "THU-Formatter-CLI")
+    EnsureSingleFolder tempDir
+    snapshotPath = JoinPathText(tempDir, GetFileNamePart(srcPath))
+
+    On Error Resume Next
+    If Len(ActiveDocument.Path) > 0 Then
+        ActiveDocument.Save
+        If Err.Number <> 0 Then
+            AppendLog logPath, "BRIDGE: source_save_warning=" & CStr(Err.Number) & " - " & Err.Description
+            Err.Clear
+        End If
+    End If
+    On Error GoTo SnapshotFailed
+    If Dir$(snapshotPath) <> "" Then
+        Kill snapshotPath
+    End If
+    ActiveDocument.SaveCopyAs FileName:=snapshotPath
+    CreateCliInputSnapshot = snapshotPath
+    Exit Function
+
+SnapshotFailed:
+    AppendLog logPath, "BRIDGE: cli_snapshot_savecopyas_failed=" & CStr(Err.Number) & " - " & Err.Description
+    Err.Clear
+    CreateCliInputSnapshot = CreateCliInputSnapshotFromClone(srcPath, snapshotPath, logPath)
+    If Len(CreateCliInputSnapshot) = 0 Then
+        CreateCliInputSnapshot = srcPath
+    End If
+End Function
+
+Private Function CreateCliInputSnapshotFromClone(ByVal srcPath As String, ByVal snapshotPath As String, ByVal logPath As String) As String
+    Dim tempDoc As Document
+
+    On Error GoTo CloneFailed
+    Set tempDoc = Application.Documents.Add(Visible:=False)
+    tempDoc.Range.FormattedText = ActiveDocument.Range.FormattedText
+    tempDoc.SaveAs2 FileName:=snapshotPath, FileFormat:=wdFormatXMLDocument, AddToRecentFiles:=False
+    tempDoc.Close SaveChanges:=wdDoNotSaveChanges
+    Set tempDoc = Nothing
+
+    AppendLog logPath, "BRIDGE: cli_snapshot_clone_ok=" & snapshotPath
+    CreateCliInputSnapshotFromClone = snapshotPath
+    Exit Function
+
+CloneFailed:
+    AppendLog logPath, "BRIDGE: cli_snapshot_clone_failed=" & CStr(Err.Number) & " - " & Err.Description
+    On Error Resume Next
+    If Not tempDoc Is Nothing Then
+        tempDoc.Close SaveChanges:=wdDoNotSaveChanges
+    End If
+    On Error GoTo 0
+    CreateCliInputSnapshotFromClone = ""
+End Function
+
+Private Sub EnsureSingleFolder(ByVal folderPath As String)
+    If Len(Dir$(folderPath, vbDirectory)) = 0 Then
+        MkDir folderPath
+    End If
+End Sub
+
+Private Sub ShowCliSuccess(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal reportHtmlPath As String, ByVal reportTextPath As String, ByVal logPath As String)
+    MsgBox BuildCliSuccessMessage(reportTextPath, fixedDocx, fixedPdf), vbInformation
+    OpenCliArtifacts fixedDocx, reportHtmlPath, logPath
+End Sub
+
+Private Sub ShowLegacySuccess(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal logPath As String, ByVal headingFixCount As Long, ByVal bodyFixCount As Long, ByVal tableFixCount As Long, ByVal captionFixCount As Long, ByVal inlineFixCount As Long)
+    MsgBox BuildLegacySuccessMessage(fixedDocx, fixedPdf, headingFixCount, bodyFixCount, tableFixCount, captionFixCount, inlineFixCount), vbInformation
+    OpenLegacyArtifacts fixedPdf, logPath
+End Sub
+
+Private Function BuildCliSuccessMessage(ByVal reportTextPath As String, ByVal fixedDocx As String, ByVal fixedPdf As String) As String
+    Dim findingsCount As Long
+    Dim fullFixCount As Long
+    Dim partialFixCount As Long
+    Dim failedFixCount As Long
+    Dim manualReviewCount As Long
+    Dim reportText As String
+
+    reportText = ReadTextFileSafe(reportTextPath)
+    findingsCount = ExtractIntByRegex(reportText, "Findings:\s+([0-9]+)", 0)
+    fullFixCount = ExtractIntByRegex(reportText, "Fix detail:\s+full=([0-9]+)", 0)
+    partialFixCount = ExtractIntByRegex(reportText, "Fix detail:\s+full=[0-9]+\s+partial=([0-9]+)", 0)
+    failedFixCount = ExtractIntByRegex(reportText, "Fix detail:\s+full=[0-9]+\s+partial=[0-9]+\s+failed=([0-9]+)", 0)
+
+    manualReviewCount = findingsCount - fullFixCount
+    If manualReviewCount < 0 Then
+        manualReviewCount = partialFixCount + failedFixCount
+    End If
+
+    BuildCliSuccessMessage = "THU Formatter 已完成（thesis-format-engine）。" & vbCrLf & vbCrLf & _
+        "发现问题: " & CStr(findingsCount) & " 项" & vbCrLf & _
+        "已完全修复: " & CStr(fullFixCount) & " 项" & vbCrLf & _
+        "仍需人工确认: " & CStr(manualReviewCount) & " 项" & vbCrLf & _
+        "修复失败: " & CStr(failedFixCount) & " 项" & vbCrLf & vbCrLf & _
+        "点击“确定”后将自动打开修复后文档和可视化报告。" & vbCrLf & vbCrLf & _
+        "输出 DOCX: " & fixedDocx & vbCrLf & _
+        "输出 PDF: " & fixedPdf
+End Function
+
+Private Function BuildLegacySuccessMessage(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal headingFixCount As Long, ByVal bodyFixCount As Long, ByVal tableFixCount As Long, ByVal captionFixCount As Long, ByVal inlineFixCount As Long) As String
+    Dim totalFixed As Long
+
+    totalFixed = headingFixCount + bodyFixCount + tableFixCount + captionFixCount + inlineFixCount
+
+    BuildLegacySuccessMessage = "THU Formatter 已完成（Word 内置修复模式）。" & vbCrLf & vbCrLf & _
+        "本次可见修复: " & CStr(totalFixed) & " 处" & vbCrLf & _
+        "标题: " & CStr(headingFixCount) & "，正文: " & CStr(bodyFixCount) & "，表格: " & CStr(tableFixCount) & vbCrLf & _
+        "题注: " & CStr(captionFixCount) & "，图形转行内: " & CStr(inlineFixCount) & vbCrLf & vbCrLf & _
+        "输出 DOCX: " & fixedDocx & vbCrLf & _
+        "输出 PDF: " & fixedPdf
+End Function
+
+Private Sub OpenCliArtifacts(ByVal fixedDocx As String, ByVal reportHtmlPath As String, ByVal logPath As String)
+    On Error Resume Next
+
+    If Dir$(fixedDocx) <> "" Then
+        Application.Documents.Open FileName:=fixedDocx, AddToRecentFiles:=False, ReadOnly:=False, Visible:=True
+    End If
+    If Dir$(reportHtmlPath) <> "" Then
+        CreateObject("Shell.Application").Open reportHtmlPath
+    End If
+
+    If Err.Number <> 0 Then
+        AppendLog logPath, "BRIDGE: open_artifacts_warning=" & CStr(Err.Number) & " - " & Err.Description
+        Err.Clear
+    End If
+
+    On Error GoTo 0
+End Sub
+
+Private Sub OpenLegacyArtifacts(ByVal fixedPdf As String, ByVal logPath As String)
+    On Error Resume Next
+    If Dir$(fixedPdf) <> "" Then
+        CreateObject("Shell.Application").Open fixedPdf
+    End If
+    If Err.Number <> 0 Then
+        AppendLog logPath, "BRIDGE: open_legacy_artifacts_warning=" & CStr(Err.Number) & " - " & Err.Description
+        Err.Clear
+    End If
+    On Error GoTo 0
+End Sub
+
+Private Function JoinPathText(ByVal leftPath As String, ByVal rightPath As String) As String
+    If Right$(leftPath, 1) = Application.PathSeparator Then
+        JoinPathText = leftPath & rightPath
+    Else
+        JoinPathText = leftPath & Application.PathSeparator & rightPath
+    End If
+End Function
+
+Private Function GetFileNamePart(ByVal filePath As String) As String
+    Dim slashPos As Long
+
+    slashPos = InStrRev(filePath, Application.PathSeparator)
+    If slashPos > 0 Then
+        GetFileNamePart = Mid$(filePath, slashPos + 1)
+    Else
+        GetFileNamePart = filePath
+    End If
 End Function
 
 Private Function GetParentFolderPath(ByVal filePath As String) As String
@@ -641,5 +921,17 @@ Private Sub AppendLog(ByVal logPath As String, ByVal lineText As String)
     ff = FreeFile
     Open logPath For Append As #ff
     Print #ff, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & lineText
+    Close #ff
+End Sub
+
+Private Sub AppendCommandOutput(ByVal logPath As String, ByVal rawText As String)
+    Dim ff As Integer
+
+    ff = FreeFile
+    Open logPath For Append As #ff
+    Print #ff, rawText;
+    If Right$(rawText, 1) <> vbCr And Right$(rawText, 1) <> vbLf Then
+        Print #ff, ""
+    End If
     Close #ff
 End Sub

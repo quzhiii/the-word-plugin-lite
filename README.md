@@ -17,7 +17,7 @@ Word Ribbon add-in for fast, accurate thesis format cleanup.
 
 ## Repository Layout
 - `src/vba/THU_Formatter_Addin.bas` - VBA add-in source
-- `customUI/customUI14.xml` - Ribbon definition
+- `customUI/customUI.xml` - Ribbon definition
 - `package/` - final distributable `THU-Formatter-Lite.dotm`
 - `INSTALL.ps1` / `UNINSTALL.ps1` - install and uninstall scripts
 - `VALIDATE_PACKAGE.ps1` - validate packaged `.dotm`
@@ -38,7 +38,7 @@ powershell -ExecutionPolicy Bypass -File .\BUILD_TEMPLATE.ps1
 
 This script:
 - copies the base template into `package/THU-Formatter-Lite.dotm`
-- injects `customUI/customUI14.xml`
+- injects `customUI/customUI.xml`
 - checks the final package still contains `word/vbaProject.bin`
 
 ## Validate Package

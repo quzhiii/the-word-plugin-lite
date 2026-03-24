@@ -5,7 +5,7 @@ $packageFile = Join-Path $root "package\THU-Formatter-Lite.dotm"
 $validator = Join-Path $root "VALIDATE_PACKAGE.ps1"
 
 if (-not (Test-Path $packageFile)) {
-  Write-Error "未找到模板文件: $packageFile`n请先按 README 打包 dotm 到 package 目录。"
+  Write-Error "Missing template file: $packageFile`nRun BUILD_TEMPLATE.ps1 first so package\THU-Formatter-Lite.dotm exists."
 }
 
 if (Test-Path $validator) {
@@ -25,11 +25,10 @@ if (-not (Test-Path $startup)) {
 $target = Join-Path $startup "THU-Formatter-Lite.dotm"
 Copy-Item -Path $packageFile -Destination $target -Force
 
-Write-Host "安装完成。"
+Write-Host "Install complete."
 Write-Host "Startup: $startup"
 Write-Host "Template: $target"
-Write-Host "请重启 Word，检查 Ribbon 是否出现 THU Formatter 标签。"
-
+Write-Host "Restart Word and check whether the THU Formatter tab appears."
 Write-Host ""
 Write-Host "Optional: configure thesis-format-engine bridge:"
 Write-Host "  setx THU_ENGINE_MODE cli"

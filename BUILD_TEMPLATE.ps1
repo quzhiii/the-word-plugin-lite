@@ -11,10 +11,10 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $packageDir = Join-Path $root "package"
 $defaultBase = Join-Path $packageDir "THU-Formatter-Lite.base.dotm"
 $defaultOutput = Join-Path $packageDir "THU-Formatter-Lite.dotm"
-$customUiSource = Join-Path $root "customUI\customUI14.xml"
+$customUiSource = Join-Path $root "customUI\customUI.xml"
 $tempDir = Join-Path $packageDir "_build_tmp"
-$customUiTargetRelative = "customUI/customUI14.xml"
-$customUiContentType = "application/vnd.ms-office.customUI+xml"
+$customUiTargetRelative = "customUI/customUI.xml"
+$customUiContentType = "application/xml"
 $customUiRelationshipType = "http://schemas.microsoft.com/office/2006/relationships/ui/extensibility"
 
 if ([string]::IsNullOrWhiteSpace($BaseDotmPath)) {
@@ -79,10 +79,10 @@ function Ensure-CustomUiRootRelationship {
     $node = $xml.CreateElement("Relationship", $ns.LookupNamespace("rel"))
     $node.SetAttribute("Id", "rId$nextNumber")
     $node.SetAttribute("Type", $customUiRelationshipType)
-    $node.SetAttribute("Target", $customUiTargetRelative)
+    $node.SetAttribute("Target", "/$customUiTargetRelative")
     $xml.Relationships.AppendChild($node) | Out-Null
   } else {
-    $existing.SetAttribute("Target", $customUiTargetRelative)
+    $existing.SetAttribute("Target", "/$customUiTargetRelative")
   }
   $xml.Save($RelsPath)
 }
@@ -125,7 +125,7 @@ if (Test-Path $customUiDir) {
   Remove-Item -Recurse -Force $customUiDir
 }
 New-Item -ItemType Directory -Path $customUiDir | Out-Null
-Copy-Item -LiteralPath $customUiSource -Destination (Join-Path $customUiDir "customUI14.xml") -Force
+Copy-Item -LiteralPath $customUiSource -Destination (Join-Path $customUiDir "customUI.xml") -Force
 
 Ensure-CustomUiContentType -ContentTypesPath (Join-Path $tempDir "[Content_Types].xml")
 Ensure-CustomUiRootRelationship -RelsPath (Join-Path $tempDir "_rels\.rels")
