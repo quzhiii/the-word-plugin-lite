@@ -685,6 +685,50 @@ Private Function ExtractIntByRegex(ByVal sourceText As String, ByVal patternText
     End If
 End Function
 
+Private Function ExtractBulletSection(ByVal sourceText As String, ByVal headingText As String, ByVal maxItems As Long) As String
+    Dim normalizedText As String
+    Dim lines() As String
+    Dim currentLine As String
+    Dim resultText As String
+    Dim foundHeading As Boolean
+    Dim itemCount As Long
+    Dim i As Long
+
+    If Len(sourceText) = 0 Then
+        Exit Function
+    End If
+
+    normalizedText = Replace$(sourceText, vbCrLf, vbLf)
+    normalizedText = Replace$(normalizedText, vbCr, vbLf)
+    lines = Split(normalizedText, vbLf)
+
+    For i = LBound(lines) To UBound(lines)
+        currentLine = Trim$(lines(i))
+        If Not foundHeading Then
+            If StrComp(currentLine, headingText, vbTextCompare) = 0 Then
+                foundHeading = True
+            End If
+        Else
+            If Len(currentLine) = 0 Then
+                Exit For
+            End If
+            If Left$(currentLine, 2) <> "- " Then
+                Exit For
+            End If
+            If Len(resultText) > 0 Then
+                resultText = resultText & vbCrLf
+            End If
+            resultText = resultText & currentLine
+            itemCount = itemCount + 1
+            If itemCount >= maxItems Then
+                Exit For
+            End If
+        End If
+    Next i
+
+    ExtractBulletSection = resultText
+End Function
+
 Private Function NormalizeCommandExecutable(ByVal rawCommand As String) As String
     Dim trimmedCommand As String
 
@@ -795,16 +839,23 @@ Private Function BuildCliSuccessMessage(ByVal reportTextPath As String, ByVal fi
     Dim failedFixCount As Long
     Dim manualReviewCount As Long
     Dim reportText As String
+    Dim changeSummaryText As String
+    Dim changeSection As String
 
     reportText = ReadTextFileSafe(reportTextPath)
     findingsCount = ExtractIntByRegex(reportText, "Findings:\s+([0-9]+)", 0)
     fullFixCount = ExtractIntByRegex(reportText, "Fix detail:\s+full=([0-9]+)", 0)
     partialFixCount = ExtractIntByRegex(reportText, "Fix detail:\s+full=[0-9]+\s+partial=([0-9]+)", 0)
     failedFixCount = ExtractIntByRegex(reportText, "Fix detail:\s+full=[0-9]+\s+partial=[0-9]+\s+failed=([0-9]+)", 0)
+    changeSummaryText = ExtractBulletSection(reportText, "Main changes:", 3)
 
     manualReviewCount = findingsCount - fullFixCount
     If manualReviewCount < 0 Then
         manualReviewCount = partialFixCount + failedFixCount
+    End If
+
+    If Len(changeSummaryText) > 0 Then
+        changeSection = "本次主要变化:" & vbCrLf & changeSummaryText & vbCrLf & vbCrLf
     End If
 
     BuildCliSuccessMessage = "THU Formatter 已完成（thesis-format-engine）。" & vbCrLf & vbCrLf & _
@@ -812,6 +863,7 @@ Private Function BuildCliSuccessMessage(ByVal reportTextPath As String, ByVal fi
         "已完全修复: " & CStr(fullFixCount) & " 项" & vbCrLf & _
         "仍需人工确认: " & CStr(manualReviewCount) & " 项" & vbCrLf & _
         "修复失败: " & CStr(failedFixCount) & " 项" & vbCrLf & vbCrLf & _
+        changeSection & _
         "点击“确定”后将自动打开修复后文档和可视化报告。" & vbCrLf & vbCrLf & _
         "输出 DOCX: " & fixedDocx & vbCrLf & _
         "输出 PDF: " & fixedPdf
