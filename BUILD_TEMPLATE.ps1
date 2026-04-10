@@ -155,4 +155,7 @@ finally {
 Write-Host "Template built: $OutputPath"
 Write-Host "Base template: $BaseDotmPath"
 Write-Host "Ribbon XML injected from: $customUiSource"
-Write-Host "Next: run .\VALIDATE_PACKAGE.ps1 and .\PACK_RELEASE.ps1"
+$outputHash = Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256
+Write-Host "Package SHA256: $($outputHash.Hash)"
+Write-Host "Next: run .\VALIDATE_PACKAGE.ps1, then reinstall and rerun .\scripts\Test-InstalledAddinParity.ps1"
+Write-Host "After install, run .\scripts\Test-StartupCompileSmoke.ps1 before release."

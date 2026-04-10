@@ -1,13 +1,14 @@
 Attribute VB_Name = "THU_Formatter_Addin"
 Option Explicit
 
-Private gRibbon As IRibbonUI
+Private gRibbon As Object
 
 Private Const ENV_TEMPLATE_PATH As String = "THU_TEMPLATE_PATH"
 Private Const ENV_ENGINE_MODE As String = "THU_ENGINE_MODE"
 Private Const ENV_ENGINE_CMD As String = "THU_ENGINE_CMD"
 Private Const ENV_ENGINE_PROFILE As String = "THU_ENGINE_PROFILE"
 Private Const ENV_ENGINE_FIX_MODE As String = "THU_ENGINE_FIX_MODE"
+Private Const ENV_ENGINE_SMOKE As String = "THU_ENGINE_SMOKE"
 Private Const ENGINE_MODE_AUTO As String = "auto"
 Private Const ENGINE_MODE_LEGACY As String = "legacy"
 Private Const ENGINE_MODE_CLI As String = "cli"
@@ -21,17 +22,62 @@ Private Const TABLE_INNER_WIDTH As Long = wdLineWidth050pt
 
 
 ' ===== Ribbon callbacks =====
-Public Sub OnRibbonLoad(ByVal ribbon As IRibbonUI)
+Public Sub OnRibbonLoad(ByVal ribbon As Object)
     Set gRibbon = ribbon
 End Sub
 
-Public Function GetRunButtonLabel(ByVal control As IRibbonControl) As String
+Public Function GetRunButtonLabel(ByVal control As Object) As String
     GetRunButtonLabel = "一键检测并修复"
 End Function
 
-Public Sub OnRunFormatter(ByVal control As IRibbonControl)
+Public Sub OnRunFormatter(ByVal control As Object)
     OneClickDetectAndFix
 End Sub
+
+Public Function AddinSelfCheck() As String
+    AddinSelfCheck = "BRIDGE_VERSION=" & BRIDGE_VERSION
+End Function
+
+Public Function AddinBridgeSmoke() As String
+    Dim srcPath As String
+    Dim fixedDocx As String
+    Dim fixedPdf As String
+    Dim logPath As String
+    Dim engineMode As String
+    Dim engineCmd As String
+    Dim engineProfile As String
+    Dim engineFixMode As String
+
+    srcPath = ActiveDocument.FullName
+    If Len(srcPath) = 0 Then
+        Err.Raise vbObjectError + 2601, "THU Formatter", "Bridge smoke requires a saved document."
+    End If
+
+    fixedDocx = BuildOutputPath(srcPath, "_fixed.docx")
+    fixedPdf = BuildOutputPath(srcPath, "_fixed.pdf")
+    logPath = BuildOutputPath(srcPath, "_fix_log.txt")
+    engineMode = ResolveEngineMode()
+    engineCmd = ReadSettingValue(ENV_ENGINE_CMD)
+    engineProfile = ResolveEngineProfile()
+    engineFixMode = ResolveEngineFixMode()
+
+    On Error GoTo Handler
+    AppendLog logPath, "SMOKE: bridge smoke start"
+    If Not ShouldTryCli(engineMode, engineCmd) Then
+        Err.Raise vbObjectError + 2602, "THU Formatter", "Bridge smoke requires CLI mode or auto mode with THU_ENGINE_CMD."
+    End If
+
+    If RunEngineCliPipeline(srcPath, fixedDocx, fixedPdf, logPath, engineCmd, engineProfile, engineFixMode) Then
+        AddinBridgeSmoke = "OK|" & logPath
+    Else
+        AddinBridgeSmoke = "FALLBACK|" & logPath
+    End If
+    Exit Function
+
+Handler:
+    AppendLog logPath, "SMOKE: bridge smoke error=" & CStr(Err.Number) & " - " & Err.Description
+    AddinBridgeSmoke = "ERROR|" & logPath & "|" & CStr(Err.Number) & "|" & Err.Description
+End Function
 
 ' ===== Main pipeline =====
 Public Sub OneClickDetectAndFix()
@@ -73,8 +119,15 @@ Public Sub OneClickDetectAndFix()
     AppendLog logPath, "MODE: engine_mode=" & engineMode & ", profile=" & engineProfile & ", fix_mode=" & engineFixMode
 
     If ShouldTryCli(engineMode, engineCmd) Then
+        AppendLog logPath, "FLOW: entering CLI pipeline"
         If RunEngineCliPipeline(srcPath, fixedDocx, fixedPdf, logPath, engineCmd, engineProfile, engineFixMode) Then
-            ShowCliSuccess fixedDocx, fixedPdf, BuildOutputPath(srcPath, "_report.html"), BuildOutputPath(srcPath, "_report.txt"), logPath
+            AppendLog logPath, "FLOW: CLI pipeline returned success"
+            If IsSmokeMode() Then
+                AppendLog logPath, "SMOKE: skip cli success ui"
+            Else
+                ShowCliSuccess fixedDocx, fixedPdf, BuildOutputPath(srcPath, "_report.html"), BuildOutputPath(srcPath, "_report.txt"), logPath
+                AppendLog logPath, "FLOW: ShowCliSuccess returned"
+            End If
             Exit Sub
         Else
             AppendLog logPath, "BRIDGE: CLI failed, fallback to legacy VBA pipeline"
@@ -105,12 +158,18 @@ Public Sub OneClickDetectAndFix()
         ", inline_warn=" & CStr(inlineWarnCount)
     AppendLog logPath, "DONE: exported docx/pdf"
 
-    ShowLegacySuccess fixedDocx, fixedPdf, logPath, headingFixCount, bodyFixCount, tableFixCount, captionFixCount, inlineFixCount
+    If IsSmokeMode() Then
+        AppendLog logPath, "SMOKE: skip legacy success ui"
+    Else
+        ShowLegacySuccess fixedDocx, fixedPdf, logPath, headingFixCount, bodyFixCount, tableFixCount, captionFixCount, inlineFixCount
+    End If
     Exit Sub
 
 Handler:
     AppendLog logPath, "ERROR: " & CStr(Err.Number) & " - " & Err.Description
-    MsgBox "格式修复失败: " & Err.Description, vbExclamation
+    If Not IsSmokeMode() Then
+        MsgBox "格式修复失败: " & Err.Description, vbExclamation
+    End If
 End Sub
 
 
@@ -523,6 +582,7 @@ Private Function RunEngineCliPipeline(ByVal srcPath As String, ByVal fixedDocx A
     Dim cliInputPath As String
     Dim commandText As String
     Dim exitCode As Long
+    Dim pdfExported As Boolean
 
     RunEngineCliPipeline = False
 
@@ -535,6 +595,7 @@ Private Function RunEngineCliPipeline(ByVal srcPath As String, ByVal fixedDocx A
     reportTextPath = BuildOutputPath(srcPath, "_report.txt")
     reportJsonPath = BuildOutputPath(srcPath, "_report.json")
     reportHtmlPath = BuildOutputPath(srcPath, "_report.html")
+    DeleteCliArtifacts fixedDocx, fixedPdf, reportJsonPath, reportHtmlPath, reportTextPath
     cliInputPath = CreateCliInputSnapshot(srcPath, logPath)
 
     commandText = NormalizeCommandExecutable(engineCmd) & " fix " & QuoteArg(cliInputPath) & _
@@ -548,32 +609,67 @@ Private Function RunEngineCliPipeline(ByVal srcPath As String, ByVal fixedDocx A
     AppendLog logPath, "BRIDGE: exit_code=" & CStr(exitCode)
 
     If exitCode <> 0 Then
+        DeleteCliArtifacts fixedDocx, fixedPdf, reportJsonPath, reportHtmlPath, reportTextPath
+        AppendLog logPath, "BRIDGE: fallback_reason=cli_exit_nonzero"
         Exit Function
     End If
 
     If Dir$(fixedDocx) = "" Then
         AppendLog logPath, "BRIDGE: fixed docx missing: " & fixedDocx
+        DeleteCliArtifacts fixedDocx, fixedPdf, reportJsonPath, reportHtmlPath, reportTextPath
+        AppendLog logPath, "BRIDGE: fallback_reason=missing_fixed_docx"
         Exit Function
     End If
 
     If Dir$(reportTextPath) <> "" Then
+        AppendLog logPath, "BRIDGE: append report text start"
         AppendExistingTextFile logPath, reportTextPath, "ENGINE_REPORT"
+        AppendLog logPath, "BRIDGE: append report text done"
     End If
 
-    ExportPdfFromFixedDocx fixedDocx, fixedPdf, logPath
+    AppendLog logPath, "BRIDGE: export pdf start"
+    pdfExported = TryExportPdfFromFixedDocx(fixedDocx, fixedPdf, logPath)
+    If pdfExported Then
+        AppendLog logPath, "BRIDGE: export pdf done"
+    Else
+        AppendLog logPath, "BRIDGE: export pdf skipped after warning"
+    End If
     AppendLog logPath, "BRIDGE: artifacts docx=" & fixedDocx & ", pdf=" & fixedPdf & ", report_json=" & reportJsonPath & ", report_html=" & reportHtmlPath & ", report_text=" & reportTextPath
+    AppendLog logPath, "BRIDGE: pipeline returning success"
     RunEngineCliPipeline = True
+End Function
+
+Private Function TryExportPdfFromFixedDocx(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal logPath As String) As Boolean
+    On Error GoTo ExportFailed
+    ExportPdfFromFixedDocx fixedDocx, fixedPdf, logPath
+    TryExportPdfFromFixedDocx = True
+    Exit Function
+
+ExportFailed:
+    AppendLog logPath, "BRIDGE: export_pdf_warning=" & CStr(Err.Number) & " - " & Err.Description
+    Err.Clear
+    TryExportPdfFromFixedDocx = False
 End Function
 
 Private Sub ExportPdfFromFixedDocx(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal logPath As String)
     Dim resultDoc As Document
 
     On Error GoTo CleanFail
-    Set resultDoc = Application.Documents.Open(FileName:=fixedDocx, AddToRecentFiles:=False, ReadOnly:=False, Visible:=False)
+    AppendLog logPath, "BRIDGE: open fixed doc for pdf start"
+    Set resultDoc = Application.Documents.Open(FileName:=fixedDocx, AddToRecentFiles:=False, ReadOnly:=False)
+    AppendLog logPath, "BRIDGE: open fixed doc for pdf done"
+    AppendLog logPath, "BRIDGE: refresh fields start"
     RefreshFieldsAndTocForDocument resultDoc, logPath
+    AppendLog logPath, "BRIDGE: refresh fields done"
+    AppendLog logPath, "BRIDGE: save fixed doc start"
     resultDoc.Save
+    AppendLog logPath, "BRIDGE: save fixed doc done"
+    AppendLog logPath, "BRIDGE: export fixed pdf start"
     resultDoc.ExportAsFixedFormat OutputFileName:=fixedPdf, ExportFormat:=wdExportFormatPDF
+    AppendLog logPath, "BRIDGE: export fixed pdf done"
+    AppendLog logPath, "BRIDGE: close fixed doc start"
     resultDoc.Close SaveChanges:=wdSaveChanges
+    AppendLog logPath, "BRIDGE: close fixed doc done"
     AppendLog logPath, "BRIDGE: exported pdf " & fixedPdf
     Exit Sub
 
@@ -593,6 +689,8 @@ Private Function RunCommandCaptureToLog(ByVal commandText As String, ByVal logPa
     Dim stderrText As String
 
     Set shellObj = CreateObject("WScript.Shell")
+    shellObj.Environment("Process")("PYTHONUTF8") = "1"
+    shellObj.Environment("Process")("PYTHONIOENCODING") = "utf-8"
     Set execObj = shellObj.Exec(commandText)
 
     Do While execObj.Status = 0
@@ -632,10 +730,12 @@ Private Function ReadSettingValue(ByVal envName As String) As String
     End If
 End Function
 
+Private Function IsSmokeMode() As Boolean
+    IsSmokeMode = (LCase$(Trim$(ReadSettingValue(ENV_ENGINE_SMOKE))) = "1")
+End Function
+
 Private Function ReadTextFileSafe(ByVal filePath As String) As String
-    Dim ff As Integer
-    Dim lineText As String
-    Dim buffer As String
+    Dim streamObj As Object
 
     If Dir$(filePath) = "" Then
         ReadTextFileSafe = ""
@@ -643,21 +743,22 @@ Private Function ReadTextFileSafe(ByVal filePath As String) As String
     End If
 
     On Error GoTo ReadFailed
-    ff = FreeFile
-    Open filePath For Input As #ff
-    Do While Not EOF(ff)
-        Line Input #ff, lineText
-        buffer = buffer & lineText & vbCrLf
-    Loop
-    Close #ff
-    ReadTextFileSafe = buffer
+    Set streamObj = CreateObject("ADODB.Stream")
+    streamObj.Type = 2
+    streamObj.Charset = "utf-8"
+    streamObj.Open
+    streamObj.LoadFromFile filePath
+    ReadTextFileSafe = streamObj.ReadText(-1)
+    streamObj.Close
+    Set streamObj = Nothing
     Exit Function
 
 ReadFailed:
     On Error Resume Next
-    If ff > 0 Then
-        Close #ff
+    If Not streamObj Is Nothing Then
+        streamObj.Close
     End If
+    Set streamObj = Nothing
     On Error GoTo 0
     ReadTextFileSafe = ""
 End Function
@@ -767,14 +868,21 @@ Private Function CreateCliInputSnapshot(ByVal srcPath As String, ByVal logPath A
     EnsureSingleFolder tempDir
     snapshotPath = JoinPathText(tempDir, GetFileNamePart(srcPath))
 
-    On Error Resume Next
-    If Len(ActiveDocument.Path) > 0 Then
-        ActiveDocument.Save
-        If Err.Number <> 0 Then
-            AppendLog logPath, "BRIDGE: source_save_warning=" & CStr(Err.Number) & " - " & Err.Description
-            Err.Clear
-        End If
+    If Len(ActiveDocument.Path) > 0 And ActiveDocument.Saved Then
+        AppendLog logPath, "BRIDGE: cli_snapshot_use_source=saved_doc"
+        CreateCliInputSnapshot = srcPath
+        Exit Function
     End If
+
+    If Len(ActiveDocument.Path) = 0 Or Not ActiveDocument.Saved Then
+        AppendLog logPath, "BRIDGE: cli_snapshot_use_clone=path_empty_or_unsaved"
+        CreateCliInputSnapshot = CreateCliInputSnapshotFromClone(srcPath, snapshotPath, logPath)
+        If Len(CreateCliInputSnapshot) = 0 Then
+            CreateCliInputSnapshot = srcPath
+        End If
+        Exit Function
+    End If
+
     On Error GoTo SnapshotFailed
     If Dir$(snapshotPath) <> "" Then
         Kill snapshotPath
@@ -796,7 +904,7 @@ Private Function CreateCliInputSnapshotFromClone(ByVal srcPath As String, ByVal 
     Dim tempDoc As Document
 
     On Error GoTo CloneFailed
-    Set tempDoc = Application.Documents.Add(Visible:=False)
+    Set tempDoc = Application.Documents.Add
     tempDoc.Range.FormattedText = ActiveDocument.Range.FormattedText
     tempDoc.SaveAs2 FileName:=snapshotPath, FileFormat:=wdFormatXMLDocument, AddToRecentFiles:=False
     tempDoc.Close SaveChanges:=wdDoNotSaveChanges
@@ -822,9 +930,30 @@ Private Sub EnsureSingleFolder(ByVal folderPath As String)
     End If
 End Sub
 
+Private Sub DeleteCliArtifacts(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal reportJsonPath As String, ByVal reportHtmlPath As String, ByVal reportTextPath As String)
+    DeleteIfExists fixedDocx
+    DeleteIfExists fixedPdf
+    DeleteIfExists reportJsonPath
+    DeleteIfExists reportHtmlPath
+    DeleteIfExists reportTextPath
+End Sub
+
+Private Sub DeleteIfExists(ByVal filePath As String)
+    On Error Resume Next
+    If Len(filePath) > 0 And Dir$(filePath) <> "" Then
+        Kill filePath
+    End If
+    Err.Clear
+    On Error GoTo 0
+End Sub
+
 Private Sub ShowCliSuccess(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal reportHtmlPath As String, ByVal reportTextPath As String, ByVal logPath As String)
+    AppendLog logPath, "UX: cli success dialog start"
     MsgBox BuildCliSuccessMessage(reportTextPath, fixedDocx, fixedPdf), vbInformation
+    AppendLog logPath, "UX: cli success dialog dismissed"
+    AppendLog logPath, "UX: cli open artifacts start"
     OpenCliArtifacts fixedDocx, reportHtmlPath, logPath
+    AppendLog logPath, "UX: cli open artifacts done"
 End Sub
 
 Private Sub ShowLegacySuccess(ByVal fixedDocx As String, ByVal fixedPdf As String, ByVal logPath As String, ByVal headingFixCount As Long, ByVal bodyFixCount As Long, ByVal tableFixCount As Long, ByVal captionFixCount As Long, ByVal inlineFixCount As Long)
@@ -864,7 +993,7 @@ Private Function BuildCliSuccessMessage(ByVal reportTextPath As String, ByVal fi
         "仍需人工确认: " & CStr(manualReviewCount) & " 项" & vbCrLf & _
         "修复失败: " & CStr(failedFixCount) & " 项" & vbCrLf & vbCrLf & _
         changeSection & _
-        "点击“确定”后将自动打开修复后文档和可视化报告。" & vbCrLf & vbCrLf & _
+        "点击“确定”后将自动打开可视化报告；修复后文档请按下方路径手动打开。" & vbCrLf & vbCrLf & _
         "输出 DOCX: " & fixedDocx & vbCrLf & _
         "输出 PDF: " & fixedPdf
 End Function
@@ -885,11 +1014,10 @@ End Function
 Private Sub OpenCliArtifacts(ByVal fixedDocx As String, ByVal reportHtmlPath As String, ByVal logPath As String)
     On Error Resume Next
 
-    If Dir$(fixedDocx) <> "" Then
-        Application.Documents.Open FileName:=fixedDocx, AddToRecentFiles:=False, ReadOnly:=False, Visible:=True
-    End If
     If Dir$(reportHtmlPath) <> "" Then
         CreateObject("Shell.Application").Open reportHtmlPath
+    ElseIf Len(Dir$(GetParentFolderPath(fixedDocx), vbDirectory)) > 0 Then
+        CreateObject("Shell.Application").Open GetParentFolderPath(fixedDocx)
     End If
 
     If Err.Number <> 0 Then
@@ -943,47 +1071,54 @@ Private Function GetParentFolderPath(ByVal filePath As String) As String
 End Function
 
 Private Sub AppendExistingTextFile(ByVal targetPath As String, ByVal sourcePath As String, ByVal sectionName As String)
-    Dim ffIn As Integer
-    Dim ffOut As Integer
-    Dim lineText As String
+    Dim sourceText As String
 
     If Dir$(sourcePath) = "" Then
         Exit Sub
     End If
 
-    ffIn = FreeFile
-    Open sourcePath For Input As #ffIn
+    sourceText = ReadTextFileSafe(sourcePath)
+    If Len(sourceText) = 0 Then
+        Exit Sub
+    End If
 
-    ffOut = FreeFile
-    Open targetPath For Append As #ffOut
-    Print #ffOut, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & sectionName & ": begin"
-
-    Do While Not EOF(ffIn)
-        Line Input #ffIn, lineText
-        Print #ffOut, lineText
-    Loop
-
-    Print #ffOut, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & sectionName & ": end"
-    Close #ffIn
-    Close #ffOut
+    AppendUtf8Text targetPath, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & sectionName & ": begin" & vbCrLf
+    AppendUtf8Text targetPath, sourceText
+    If Right$(sourceText, 1) <> vbCr And Right$(sourceText, 1) <> vbLf Then
+        AppendUtf8Text targetPath, vbCrLf
+    End If
+    AppendUtf8Text targetPath, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & sectionName & ": end" & vbCrLf
 End Sub
 
 Private Sub AppendLog(ByVal logPath As String, ByVal lineText As String)
-    Dim ff As Integer
-    ff = FreeFile
-    Open logPath For Append As #ff
-    Print #ff, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & lineText
-    Close #ff
+    AppendUtf8Text logPath, Format$(Now, "yyyy-mm-dd hh:nn:ss") & " | " & lineText & vbCrLf
 End Sub
 
 Private Sub AppendCommandOutput(ByVal logPath As String, ByVal rawText As String)
-    Dim ff As Integer
-
-    ff = FreeFile
-    Open logPath For Append As #ff
-    Print #ff, rawText;
+    AppendUtf8Text logPath, rawText
     If Right$(rawText, 1) <> vbCr And Right$(rawText, 1) <> vbLf Then
-        Print #ff, ""
+        AppendUtf8Text logPath, vbCrLf
     End If
-    Close #ff
+End Sub
+
+Private Sub AppendUtf8Text(ByVal targetPath As String, ByVal textToAppend As String)
+    Dim streamObj As Object
+    Dim existingText As String
+
+    existingText = ""
+    If Len(targetPath) > 0 And Dir$(targetPath) <> "" Then
+        existingText = ReadTextFileSafe(targetPath)
+    End If
+
+    Set streamObj = CreateObject("ADODB.Stream")
+    streamObj.Type = 2
+    streamObj.Charset = "utf-8"
+    streamObj.Open
+    If Len(existingText) > 0 Then
+        streamObj.WriteText existingText
+    End If
+    streamObj.WriteText textToAppend
+    streamObj.SaveToFile targetPath, 2
+    streamObj.Close
+    Set streamObj = Nothing
 End Sub
